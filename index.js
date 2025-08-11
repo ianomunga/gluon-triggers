@@ -1,12 +1,12 @@
 const AWS = require('aws-sdk');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
-exports.handler = async (event) => {
+exports.handler = async (event, context) => {
   try {
     console.log("Incoming event:", JSON.stringify(event));
 
     const {
-      AWS_REGION='us-east-1',
+      AWS_REGION = 'us-east-1',
       INSTANCE_ID,
       HEALTH_URL,
       BACKEND_API_URL
@@ -15,9 +15,12 @@ exports.handler = async (event) => {
     const ec2 = new AWS.EC2({ region: AWS_REGION });
 
     const body = JSON.parse(event.body);
-    const { user_id, instance_type, ami_id } = body;
+    const { user_id } = body;
 
-    // 1. Describe instance
+    const instance_type = 'g4dn.2xlarge';
+    const ami_id = 'ami-0a7d80731ae1b2435';
+
+    // 1. Describe the instance
     const descRes = await ec2.describeInstances({
       InstanceIds: [INSTANCE_ID]
     }).promise();
@@ -31,23 +34,31 @@ exports.handler = async (event) => {
     }
 
     // 2. Wait for health check
-    const timeout = Date.now() + 3 * 60 * 1000; // 3 minutes
-    let healthy = false;
+    const lambdaTimeoutRemaining = context.getRemainingTimeInMillis();
+    const MAX_HEALTH_WAIT = Math.min(lambdaTimeoutRemaining - 10000, 7 * 60 * 1000);
+    const timeout = Date.now() + MAX_HEALTH_WAIT;
 
+    console.log(`Waiting for instance to become healthy (max wait: ${MAX_HEALTH_WAIT}ms)`);
+
+    let healthy = false;
     while (Date.now() < timeout) {
       try {
-        const health = await fetch(HEALTH_URL);
-        if (health.ok) {
+        const healthRes = await fetch(HEALTH_URL);
+        if (healthRes.ok) {
           healthy = true;
+          console.log("Instance is healthy.");
           break;
+        } else {
+          console.log(`Health check failed with status: ${healthRes.status}`);
         }
-      } catch (_) {
-        // ignore
+      } catch (err) {
+        console.log("Health check request failed (retrying)...", err.message);
       }
       await new Promise(r => setTimeout(r, 3000));
     }
 
     if (!healthy) {
+      console.warn("Health check timed out.");
       return {
         statusCode: 504,
         body: 'Server did not become healthy in time.'
